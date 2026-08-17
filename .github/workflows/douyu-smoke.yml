@@ -1,0 +1,21 @@
+name: Douyu smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'douyu.mjs'
+      - '.github/workflows/douyu-smoke.yml'
+
+jobs:
+  douyu-6657:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve and validate Douyu 6657
+        run: node douyu.mjs 6657 --check --no-url
