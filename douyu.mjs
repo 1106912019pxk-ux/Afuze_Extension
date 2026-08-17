@@ -33,10 +33,6 @@ function parseArgs(argv) {
     }
   }
 
-  if (!/^\d+$/.test(options.roomId)) {
-    throw new Error('This minimal test intentionally accepts numeric Douyu room IDs only');
-  }
-
   return options;
 }
 
@@ -67,22 +63,47 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function getSignScript(roomId) {
-  const data = await fetchJson(`https://www.douyu.com/swf_api/homeH5Enc?rids=${roomId}`, {
+async function resolveRealRoomId(publicRoomId) {
+  // Douyu lets popular rooms use short public IDs (6657 is one example), but
+  // getH5Play expects the canonical room_id. The normal room HTML exposes it.
+  const html = await fetchText(`https://www.douyu.com/${publicRoomId}`, {
     headers: {
-      Referer: `https://www.douyu.com/${roomId}`,
+      Referer: 'https://www.douyu.com/',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     },
   });
 
-  const script = data?.data?.[`room${roomId}`];
+  const patterns = [
+    /\$ROOM\.room_id\s*=\s*["']?(\d+)/,
+    /["']room_id["']\s*:\s*["']?(\d+)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) return match[1];
+  }
+
+  // Many rooms already use their canonical numeric ID. Falling back keeps the
+  // resolver useful even if Douyu trims the bootstrapping variables in HTML.
+  return String(publicRoomId);
+}
+
+async function getSignScript(realRoomId, publicRoomId) {
+  const data = await fetchJson(`https://www.douyu.com/swf_api/homeH5Enc?rids=${realRoomId}`, {
+    headers: {
+      Referer: `https://www.douyu.com/${publicRoomId}`,
+    },
+  });
+
+  const script = data?.data?.[`room${realRoomId}`];
   if (!script) {
-    throw new Error(`Douyu did not return the H5 signing script for room ${roomId}`);
+    throw new Error(`Douyu did not return the H5 signing script for room ${realRoomId}`);
   }
 
   return script;
 }
 
-function makeSign(signScript, roomId) {
+function makeSign(signScript, realRoomId) {
   const did = randomBytes(16).toString('hex');
   const timestamp = Math.round(Date.now() / 1000).toString();
 
@@ -105,7 +126,7 @@ function makeSign(signScript, roomId) {
     throw new Error('Signing function ub98484234 was not created');
   }
 
-  const result = sandbox.ub98484234(String(roomId), did, timestamp);
+  const result = sandbox.ub98484234(String(realRoomId), did, timestamp);
   if (typeof result !== 'string' || !result.includes('=')) {
     throw new Error(`Unexpected signing result: ${String(result).slice(0, 120)}`);
   }
@@ -113,7 +134,7 @@ function makeSign(signScript, roomId) {
   return new URLSearchParams(result);
 }
 
-async function getPlayData(roomId, signParams, rate) {
+async function getPlayData(realRoomId, publicRoomId, signParams, rate) {
   const body = new URLSearchParams(signParams);
   body.set('cdn', '');
   body.set('rate', String(rate));
@@ -123,10 +144,10 @@ async function getPlayData(roomId, signParams, rate) {
   body.set('hevc', '0');
   body.set('fa', '0');
 
-  const result = await fetchJson(`https://www.douyu.com/lapi/live/getH5Play/${roomId}`, {
+  const result = await fetchJson(`https://www.douyu.com/lapi/live/getH5Play/${realRoomId}`, {
     method: 'POST',
     headers: {
-      Referer: `https://www.douyu.com/${roomId}`,
+      Referer: `https://www.douyu.com/${publicRoomId}`,
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
     },
     body: body.toString(),
@@ -203,12 +224,13 @@ async function checkDirectStream(url) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const signScript = await getSignScript(options.roomId);
-  const signParams = makeSign(signScript, options.roomId);
-  const playData = await getPlayData(options.roomId, signParams, options.rate);
+  const realRoomId = await resolveRealRoomId(options.roomId);
+  const signScript = await getSignScript(realRoomId, options.roomId);
+  const signParams = makeSign(signScript, realRoomId);
+  const playData = await getPlayData(realRoomId, options.roomId, signParams, options.rate);
   const streamUrl = buildStreamUrl(playData);
 
-  console.log(`Room: ${options.roomId}`);
+  console.log(`Room: ${options.roomId}${realRoomId !== options.roomId ? ` -> ${realRoomId}` : ''}`);
   console.log('Status: LIVE (getH5Play returned a stream)');
   console.log(`Rate: ${playData.rate ?? options.rate}`);
   console.log(`CDN: ${playData.rtmp_cdn || '-'}`);
