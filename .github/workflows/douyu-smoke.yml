@@ -18,4 +18,4 @@ jobs:
         with:
           node-version: '22'
       - name: Resolve and validate Douyu 6657
-        run: node douyu.mjs 6657 --check --no-url
+        run: node douyu.mjs 6657 --check
