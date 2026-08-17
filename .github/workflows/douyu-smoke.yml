@@ -17,9 +17,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Generate line 1 ws-h5
-        run: node douyu.mjs 6657 --check
-      - name: Generate line 7 hw-h5
-        run: |
-          sed -i "s/body.set('cdn', '');/body.set('cdn', 'hw-h5');/" douyu.mjs
-          node douyu.mjs 6657 --check
+      - name: Resolve and validate Douyu 6657
+        run: node douyu.mjs 6657 --check --no-url
