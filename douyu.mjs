@@ -4,6 +4,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import vm from 'node:vm';
 
 const DEFAULT_ROOM = '6657';
+
+// We only maintain a few fixed rooms.  If a Douyu vanity/short room number is
+// different from its canonical room_id, add one line here.
+const ROOM_ALIASES = {
+  '6657': '6979222', // 玩机器丶Machine
+};
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
@@ -64,8 +71,10 @@ async function fetchJson(url, options = {}) {
 }
 
 async function resolveRealRoomId(publicRoomId) {
-  // Douyu lets popular rooms use short public IDs (6657 is one example), but
-  // getH5Play expects the canonical room_id. The normal room HTML exposes it.
+  if (ROOM_ALIASES[publicRoomId]) return ROOM_ALIASES[publicRoomId];
+
+  // Best-effort fallback for ordinary numeric rooms.  Some current Douyu HTML
+  // builds still expose room_id directly; if not, use the supplied number.
   const html = await fetchText(`https://www.douyu.com/${publicRoomId}`, {
     headers: {
       Referer: 'https://www.douyu.com/',
@@ -83,8 +92,6 @@ async function resolveRealRoomId(publicRoomId) {
     if (match) return match[1];
   }
 
-  // Many rooms already use their canonical numeric ID. Falling back keeps the
-  // resolver useful even if Douyu trims the bootstrapping variables in HTML.
   return String(publicRoomId);
 }
 
