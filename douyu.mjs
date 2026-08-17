@@ -26,11 +26,15 @@ function parseArgs(argv) {
     } else if (arg.startsWith('--rate=')) {
       options.rate = arg.slice('--rate='.length);
     } else if (arg === '--help' || arg === '-h') {
-      console.log(`Usage: node douyu.mjs [roomId] [--check] [--rate=-1] [--no-url]\n\nExamples:\n  node douyu.mjs\n  node douyu.mjs 6657\n  node douyu.mjs 6657 --check`);
+      console.log(`Usage: node douyu.mjs [numericRoomId] [--check] [--rate=-1] [--no-url]\n\nExamples:\n  node douyu.mjs\n  node douyu.mjs 6657\n  node douyu.mjs 6657 --check`);
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
+  }
+
+  if (!/^\d+$/.test(options.roomId)) {
+    throw new Error('This minimal test intentionally accepts numeric Douyu room IDs only');
   }
 
   return options;
@@ -63,45 +67,27 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function getRoomInfo(roomId) {
-  const data = await fetchJson(`https://www.douyu.com/betard/${roomId}`, {
+async function getSignScript(roomId) {
+  const data = await fetchJson(`https://www.douyu.com/swf_api/homeH5Enc?rids=${roomId}`, {
     headers: {
       Referer: `https://www.douyu.com/${roomId}`,
     },
   });
 
-  if (!data?.room) {
-    throw new Error(`Room ${roomId} was not found in /betard response`);
+  const script = data?.data?.[`room${roomId}`];
+  if (!script) {
+    throw new Error(`Douyu did not return the H5 signing script for room ${roomId}`);
   }
 
-  return data.room;
+  return script;
 }
 
-async function getSignScript(primaryRoomId, fallbackRoomId) {
-  const candidates = [...new Set([primaryRoomId, fallbackRoomId].filter(Boolean).map(String))];
-
-  for (const roomId of candidates) {
-    const data = await fetchJson(`https://www.douyu.com/swf_api/homeH5Enc?rids=${roomId}`, {
-      headers: {
-        Referer: `https://www.douyu.com/${fallbackRoomId || roomId}`,
-      },
-    });
-
-    const script = data?.data?.[`room${roomId}`];
-    if (script) {
-      return script;
-    }
-  }
-
-  throw new Error('Douyu did not return the H5 signing script');
-}
-
-function makeSign(signScript, realRoomId) {
+function makeSign(signScript, roomId) {
   const did = randomBytes(16).toString('hex');
   const timestamp = Math.round(Date.now() / 1000).toString();
 
-  // Douyu's current H5 signing function uses CryptoJS.MD5.  A complete
-  // crypto-js dependency is unnecessary here: Node's built-in MD5 is enough.
+  // The H5 signing code currently only needs CryptoJS.MD5. Replacing that tiny
+  // surface with Node's built-in crypto keeps this experiment dependency-free.
   const sandbox = {
     CryptoJS: {
       MD5(value) {
@@ -119,7 +105,7 @@ function makeSign(signScript, realRoomId) {
     throw new Error('Signing function ub98484234 was not created');
   }
 
-  const result = sandbox.ub98484234(String(realRoomId), did, timestamp);
+  const result = sandbox.ub98484234(String(roomId), did, timestamp);
   if (typeof result !== 'string' || !result.includes('=')) {
     throw new Error(`Unexpected signing result: ${String(result).slice(0, 120)}`);
   }
@@ -127,47 +113,31 @@ function makeSign(signScript, realRoomId) {
   return new URLSearchParams(result);
 }
 
-async function getPlayData(requestRoomId, realRoomId, signParams, rate) {
+async function getPlayData(roomId, signParams, rate) {
   const body = new URLSearchParams(signParams);
   body.set('cdn', '');
   body.set('rate', String(rate));
-  body.set('ver', 'Douyu_226050601');
+  body.set('ver', 'Douyu_223061205');
   body.set('iar', '1');
   body.set('ive', '1');
   body.set('hevc', '0');
   body.set('fa', '0');
 
-  // Prefer the canonical numeric room id, then fall back to the public/alias id.
-  const endpoints = [...new Set([realRoomId, requestRoomId].map(String))];
-  let lastError;
+  const result = await fetchJson(`https://www.douyu.com/lapi/live/getH5Play/${roomId}`, {
+    method: 'POST',
+    headers: {
+      Referer: `https://www.douyu.com/${roomId}`,
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    },
+    body: body.toString(),
+  });
 
-  for (const endpointRoomId of endpoints) {
-    try {
-      const result = await fetchJson(
-        `https://www.douyu.com/lapi/live/getH5Play/${endpointRoomId}`,
-        {
-          method: 'POST',
-          headers: {
-            Referer: `https://www.douyu.com/${requestRoomId}`,
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          },
-          body: body.toString(),
-        },
-      );
-
-      if (result?.error === 0 && result?.data?.rtmp_url && result?.data?.rtmp_live) {
-        return result.data;
-      }
-
-      lastError = new Error(
-        `getH5Play(${endpointRoomId}) error=${result?.error}, msg=${result?.msg || 'unknown'}`,
-      );
-    } catch (error) {
-      lastError = error;
-    }
+  if (result?.error !== 0 || !result?.data?.rtmp_url || !result?.data?.rtmp_live) {
+    const msg = result?.msg || result?.data?.msg || 'unknown';
+    throw new Error(`getH5Play error=${result?.error}, msg=${msg}; room may be offline or Douyu changed the API`);
   }
 
-  throw lastError || new Error('Unable to get Douyu play data');
+  return result.data;
 }
 
 function buildStreamUrl(playData) {
@@ -181,8 +151,7 @@ async function checkDirectStream(url) {
   const timer = setTimeout(() => controller.abort(), 10000);
 
   try {
-    // Deliberately do NOT send a Douyu Referer here.  Afuze normally receives
-    // only the URL, so this test checks whether the CDN URL is truly direct.
+    // No Referer on purpose. Afuze is expected to receive only this media URL.
     const response = await fetch(url, {
       method: 'GET',
       redirect: 'follow',
@@ -197,7 +166,6 @@ async function checkDirectStream(url) {
       return {
         ok: false,
         status: response.status,
-        contentType: response.headers.get('content-type') || '',
         reason: `${response.status} ${response.statusText}`,
       };
     }
@@ -208,21 +176,19 @@ async function checkDirectStream(url) {
         ok: true,
         status: response.status,
         contentType: response.headers.get('content-type') || '',
-        firstBytes: '',
+        isFlv: null,
       };
     }
 
     const { value } = await reader.read();
     await reader.cancel().catch(() => {});
     const bytes = value || new Uint8Array();
-    const firstBytes = Buffer.from(bytes.slice(0, 8)).toString('hex');
     const isFlv = bytes.length >= 3 && bytes[0] === 0x46 && bytes[1] === 0x4c && bytes[2] === 0x56;
 
     return {
       ok: true,
       status: response.status,
       contentType: response.headers.get('content-type') || '',
-      firstBytes,
       isFlv,
     };
   } catch (error) {
@@ -237,45 +203,27 @@ async function checkDirectStream(url) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const room = await getRoomInfo(options.roomId);
-  const realRoomId = String(room.room_id || options.roomId);
-
-  if (Number(room.show_status) !== 1) {
-    console.log(`Room: ${options.roomId} -> ${realRoomId}`);
-    console.log(`Anchor: ${room.owner_name || '-'}`);
-    console.log(`Title: ${room.room_name || '-'}`);
-    console.log('Status: OFFLINE');
-    process.exitCode = 2;
-    return;
-  }
-
-  if (Number(room.videoLoop) === 1) {
-    throw new Error('The room is currently replaying VOD instead of a real live stream');
-  }
-
-  const signScript = await getSignScript(realRoomId, options.roomId);
-  const signParams = makeSign(signScript, realRoomId);
-  const playData = await getPlayData(options.roomId, realRoomId, signParams, options.rate);
+  const signScript = await getSignScript(options.roomId);
+  const signParams = makeSign(signScript, options.roomId);
+  const playData = await getPlayData(options.roomId, signParams, options.rate);
   const streamUrl = buildStreamUrl(playData);
 
-  console.log(`Room: ${options.roomId} -> ${realRoomId}`);
-  console.log(`Anchor: ${room.owner_name || '-'}`);
-  console.log(`Title: ${room.room_name || '-'}`);
-  console.log('Status: LIVE');
+  console.log(`Room: ${options.roomId}`);
+  console.log('Status: LIVE (getH5Play returned a stream)');
   console.log(`Rate: ${playData.rate ?? options.rate}`);
   console.log(`CDN: ${playData.rtmp_cdn || '-'}`);
   console.log(`Format: ${/\.flv(?:\?|$)/i.test(streamUrl) ? 'FLV' : 'unknown'}`);
 
   if (options.check) {
     const result = await checkDirectStream(streamUrl);
-    if (result.ok) {
+    if (result.ok && result.isFlv !== false) {
       console.log(
         `Direct check: OK (HTTP ${result.status}, ${result.contentType || 'no content-type'}${
           result.isFlv === true ? ', FLV header OK' : ''
         })`,
       );
     } else {
-      console.log(`Direct check: FAILED (${result.reason || 'unknown'})`);
+      console.log(`Direct check: FAILED (${result.reason || 'response was not FLV'})`);
       process.exitCode = 3;
     }
   }
