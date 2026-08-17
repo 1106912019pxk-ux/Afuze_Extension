@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Probe Douyu 6657 rate 1
-        run: node douyu.mjs 6657 --rate=1 --check
-      - name: Probe Douyu 6657 rate 0
-        run: node douyu.mjs 6657 --rate=0 --check
+      - name: Inspect Douyu 6657 options
+        run: |
+          sed -i "/const streamUrl = buildStreamUrl(playData);/a\\  console.log('Multirates:', JSON.stringify(playData.multirates || [])); console.log('CDNs:', JSON.stringify(playData.cdnsWithName || []));" douyu.mjs
+          node douyu.mjs 6657 --no-url
